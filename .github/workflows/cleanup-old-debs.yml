@@ -1,0 +1,27 @@
+name: Remove obsolete DEB releases
+on:
+  push:
+    paths:
+      - '.github/workflows/cleanup-old-debs.yml'
+permissions:
+  contents: write
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Preserve v1.0.6 and delete previous packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view v1.0.6 --json tagName,assets | grep -q 'com.551uk.reynarddefault16_1.0.6_iphoneos-arm64.deb'
+          for version in v1.0.0 v1.0.1 v1.0.2 v1.0.3 v1.0.4 v1.0.5; do
+            if gh release view "$version" >/dev/null 2>&1; then
+              gh release delete "$version" --cleanup-tag --yes
+              echo "Deleted obsolete release $version"
+            fi
+          done
+          echo "Remaining releases:"
+          gh release list --limit 20
