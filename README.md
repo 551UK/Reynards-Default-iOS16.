@@ -1,6 +1,6 @@
 # Reynard Default iOS 16
 
-Opens app links in installed apps. Other links open in Reynard.
+Opens supported links in their apps. Resolves eBay links shared through WhatsApp. Other websites use Reynard.
 
 Settings and Control Centre toggles. iOS 16 rootless.
 
