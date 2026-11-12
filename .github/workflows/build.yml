@@ -1,0 +1,55 @@
+name: Build iOS 16
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: brew install make dpkg ldid
+      - name: Install Theos
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$RUNNER_TEMP/theos"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$RUNNER_TEMP/sdks"
+          git -C "$RUNNER_TEMP/sdks" sparse-checkout set iPhoneOS16.5.sdk
+          cp -R "$RUNNER_TEMP/sdks/iPhoneOS16.5.sdk" "$RUNNER_TEMP/theos/sdks/"
+          echo "THEOS=$RUNNER_TEMP/theos" >> "$GITHUB_ENV"
+      - name: Check Settings icons and plist
+        shell: bash
+        run: |
+          set -euo pipefail
+          plutil -lint ReynardDefaultPrefs/Resources/Root.plist
+          plutil -lint ReynardDefaultPrefs/layout/Library/PreferenceLoader/Preferences/ReynardDefaultPrefs.plist
+          test -s ReynardDefaultPrefs/Resources/SettingsIcon@2x.png
+          test -s ReynardDefaultPrefs/Resources/SettingsIcon@3x.png
+      - name: Build rootless deb
+        run: gmake clean package FINALPACKAGE=1
+      - name: Verify package
+        shell: bash
+        run: |
+          set -euo pipefail
+          for deb in packages/*_iphoneos-arm64.deb; do
+            test -f "$deb"
+            test "$(dpkg-deb -f "$deb" Architecture)" = iphoneos-arm64
+            dpkg-deb -x "$deb" "$RUNNER_TEMP/extracted"
+            test -s "$RUNNER_TEMP/extracted/var/jb/Library/PreferenceBundles/ReynardDefaultPrefs.bundle/SettingsIcon@2x.png"
+            shasum -a 256 "$deb" >> packages/SHA256SUMS
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ReynardDefault16-rootless
+          path: packages/*
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          version=$(awk '/^Version:/ {print $2}' control)
+          gh release create "v$version" packages/*.deb packages/SHA256SUMS --target "$GITHUB_SHA" --title "Reynard Default iOS 16 v$version" --notes "App links first. Reynard for websites." --latest || gh release upload "v$version" packages/*.deb packages/SHA256SUMS --clobber
