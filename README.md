@@ -1,7 +1,7 @@
 # Reynard Default iOS 16
 
-Opens supported links in their apps. Resolves WhatsApp eBay short links to individual listings.
+Opens supported posts, videos and listings in their apps. Other links open in Reynard.
 
-Settings and Control Centre toggles. iOS 16 rootless.
+Fixes eBay short links from WhatsApp. Settings and Control Centre toggles. iOS 16 rootless.
 
 [Download](https://github.com/551UK/Reynards-Default-iOS16./releases)

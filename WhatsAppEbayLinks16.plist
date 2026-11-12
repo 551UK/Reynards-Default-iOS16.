@@ -1,1 +1,10 @@
-<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>Filter</key><dict><key>Bundles</key><array><string>net.whatsapp.WhatsApp</string></array></dict></dict></plist>
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>Filter</key><dict><key>Bundles</key><array>
+<string>net.whatsapp.WhatsApp</string>
+<string>com.apple.MobileSMS</string>
+<string>org.telegram.Telegram</string>
+<string>org.whispersystems.signal</string>
+<string>com.hammerandchisel.discord</string>
+<string>com.facebook.Messenger</string>
+<string>com.apple.mobilemail</string>
+</array></dict></dict></plist>
