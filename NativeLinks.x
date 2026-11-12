@@ -36,8 +36,29 @@ static BOOL RDBrowser(NSString *bid) {
     return [@[@"com.apple.mobilesafari", @"org.mozilla.ios.Firefox",
         @"com.google.chrome.ios", @"com.brave.ios.browser",
         @"com.microsoft.msedge", @"org.mozilla.ios.Focus",
+        @"com.minh-ton.Reynard",
         @"com.duckduckgo.mobile.ios"] containsObject:bid];
 }
+// Some requests arrive after the SpringBoard redirect has wrapped them.
+static NSURL *RDSourceURL(NSURL *url) {
+    if (!url) return nil;
+    if ([url.scheme.lowercaseString isEqualToString:@"reynard"] &&
+        [url.host.lowercaseString isEqualToString:@"open"]) {
+        NSURLComponents *components = [NSURLComponents componentsWithURL:url
+                                             resolvingAgainstBaseURL:NO];
+        for (NSURLQueryItem *item in components.queryItems) {
+            if (![item.name isEqualToString:@"url"]) continue;
+            NSURL *decoded = [NSURL URLWithString:item.value ?: @""];
+            if (RDIsEbayShortLink(decoded)) return decoded;
+        }
+    }
+    return url;
+}
+
+static BOOL RDHasEbayShortLink(NSURL *url) {
+    return RDIsEbayShortLink(RDSourceURL(url));
+}
+
 static NSURL *RDReynardURL(NSURL *url) {
     NSCharacterSet *safe = [NSCharacterSet characterSetWithCharactersInString:
         @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"];
@@ -122,12 +143,12 @@ static FBSOpenApplicationOptions *RDOptionsForItem(FBSOpenApplicationOptions *ol
     BOOL replaced = NO;
     for (id key in original) {
         id value = original[key];
-        if ([value isKindOfClass:[NSURL class]] && RDIsEbayShortLink(value)) {
+        if ([value isKindOfClass:[NSURL class]] && RDHasEbayShortLink(value)) {
             updated[key] = newURL;
             replaced = YES;
         }
     }
-    if (!replaced && old.url && RDIsEbayShortLink(old.url)) {
+    if (!replaced && old.url && RDHasEbayShortLink(old.url)) {
         // Private FBS payload key used by iOS 15/16.
         updated[@"__PayloadURL"] = newURL;
         replaced = YES;
@@ -141,11 +162,11 @@ static FBSOpenApplicationOptions *RDOptionsForItem(FBSOpenApplicationOptions *ol
 
 static NSURL *RDRequestURL(FBSOpenApplicationOptions *options) {
     if ([options respondsToSelector:@selector(url)] && options.url)
-        return options.url;
+        return RDSourceURL(options.url);
     if (![options respondsToSelector:@selector(dictionary)]) return nil;
     for (id value in options.dictionary.allValues)
-        if ([value isKindOfClass:[NSURL class]] && RDIsEbayShortLink(value))
-            return value;
+        if ([value isKindOfClass:[NSURL class]] && RDHasEbayShortLink(value))
+            return RDSourceURL(value);
     return nil;
 }
 
