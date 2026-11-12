@@ -2,6 +2,10 @@
 #import <objc/runtime.h>
 #import "Common/Common.h"
 
+@interface NSObject (RDApplicationProxy)
+- (NSString *)applicationIdentifier;
+@end
+
 @interface FBSOpenApplicationOptions : NSObject
 @property (nonatomic, readonly) NSURL *url;
 @property (nonatomic, readonly) NSDictionary *dictionary;
