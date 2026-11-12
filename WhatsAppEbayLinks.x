@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <objc/message.h>
 #import "Common/Common.h"
 
 // Only eBay short links opened from WhatsApp are intercepted.
