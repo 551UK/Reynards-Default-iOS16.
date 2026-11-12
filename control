@@ -1,0 +1,11 @@
+Package: com.551uk.reynarddefault16
+Name: Reynard Default iOS 16
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: App links first. Reynard for websites.
+Maintainer: 551UK
+Author: 551UK
+Section: Tweaks
+Depends: mobilesubstrate, preferenceloader, com.opa334.ccsupport, firmware (>= 16.0), firmware (<< 17.0)
+Conflicts: com.guacforlife.reynarddefault
+Homepage: https://github.com/551UK/Reynards-Default-iOS16.

@@ -1,9 +1,7 @@
 # Reynard Default iOS 16
 
-Opens supported links in installed apps. Other web links open in Reynard.
+Opens app links in installed apps. Other links open in Reynard.
 
-Includes Settings and Control Centre toggles.
+Settings and Control Centre toggles. iOS 16 rootless.
 
-**iOS 16 · rootless**
-
-[Releases](https://github.com/551UK/Reynards-Default-iOS16./releases)
+[Download](https://github.com/551UK/Reynards-Default-iOS16./releases)
