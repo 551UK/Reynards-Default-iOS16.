@@ -29,6 +29,12 @@ jobs:
           plutil -lint ReynardDefaultPrefs/layout/Library/PreferenceLoader/Preferences/ReynardDefaultPrefs.plist
           test -s ReynardDefaultPrefs/Resources/SettingsIcon@2x.png
           test -s ReynardDefaultPrefs/Resources/SettingsIcon@3x.png
+      - name: Test link routing
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun clang -fobjc-arc -framework Foundation -I. tests/routing.m -o "$RUNNER_TEMP/routing-tests"
+          "$RUNNER_TEMP/routing-tests"
       - name: Build rootless deb
         run: gmake clean package FINALPACKAGE=1
       - name: Verify package
@@ -40,6 +46,9 @@ jobs:
             test "$(dpkg-deb -f "$deb" Architecture)" = iphoneos-arm64
             dpkg-deb -x "$deb" "$RUNNER_TEMP/extracted"
             test -s "$RUNNER_TEMP/extracted/var/jb/Library/PreferenceBundles/ReynardDefaultPrefs.bundle/SettingsIcon@2x.png"
+            test -s "$RUNNER_TEMP/extracted/var/jb/Library/MobileSubstrate/DynamicLibraries/NativeLinks16.dylib"
+            test -s "$RUNNER_TEMP/extracted/var/jb/Library/MobileSubstrate/DynamicLibraries/NativeLinks16.plist"
+            test -s "$RUNNER_TEMP/extracted/var/jb/Library/MobileSubstrate/DynamicLibraries/ReynardDefault16.dylib"
             shasum -a 256 "$deb" >> packages/SHA256SUMS
           done
       - uses: actions/upload-artifact@v4
