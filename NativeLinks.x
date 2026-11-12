@@ -1,183 +1,287 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <objc/runtime.h>
 #import "Common/Common.h"
 #import "Routing.h"
 
-// Intercept links only when opened. No polling or background activity.
-static __thread BOOL gInternalOpen = NO;
+// Shared by UIApplication and FrontBoard interceptors.
+static __thread BOOL gBypassing = NO;
+static char kHandledOptionsKey;
 
-static BOOL enabled(void) {
-    NSUserDefaults *prefs = [[NSUserDefaults alloc] initWithSuiteName:kSuiteName];
-    [prefs synchronize];
-    id main = [prefs objectForKey:kEnabledKey];
-    id links = [prefs objectForKey:kAppLinksKey];
-    return (!main || [main boolValue]) && (!links || [links boolValue]);
+@interface FBSOpenApplicationOptions : NSObject
+@property (nonatomic, readonly) NSURL *url;
+@property (nonatomic, readonly) NSDictionary *dictionary;
++ (instancetype)optionsWithDictionary:(NSDictionary *)dictionary;
+@end
+
+@interface FBSOpenApplicationService : NSObject
+- (void)openApplication:(NSString *)bid
+           withOptions:(FBSOpenApplicationOptions *)options
+            completion:(id)completion;
+- (void)openApplication:(NSString *)bid
+           withOptions:(FBSOpenApplicationOptions *)options
+          clientHandle:(id)client
+            completion:(id)completion;
+@end
+
+static BOOL RDEnabled(void) {
+    NSUserDefaults *p = [[NSUserDefaults alloc] initWithSuiteName:kSuiteName];
+    [p synchronize];
+    id enabled = [p objectForKey:kEnabledKey];
+    id links = [p objectForKey:kAppLinksKey];
+    return (!enabled || [enabled boolValue]) && (!links || [links boolValue]);
 }
-
-static NSURL *reynardURL(NSURL *url) {
+static BOOL RDBrowser(NSString *bid) {
+    return [@[@"com.apple.mobilesafari", @"org.mozilla.ios.Firefox",
+        @"com.google.chrome.ios", @"com.brave.ios.browser",
+        @"com.microsoft.msedge", @"org.mozilla.ios.Focus",
+        @"com.duckduckgo.mobile.ios"] containsObject:bid];
+}
+static NSURL *RDReynardURL(NSURL *url) {
     NSCharacterSet *safe = [NSCharacterSet characterSetWithCharactersInString:
         @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"];
     NSString *encoded = [url.absoluteString stringByAddingPercentEncodingWithAllowedCharacters:safe];
-    return encoded.length ? [NSURL URLWithString:
-        [@"reynard://open?url=" stringByAppendingString:encoded]] : nil;
+    return encoded.length ?
+        [NSURL URLWithString:[@"reynard://open?url=" stringByAppendingString:encoded]] : nil;
 }
 
-static void rawOpen(UIApplication *app, NSURL *url, NSDictionary *options,
-                    void (^completion)(BOOL)) {
+// Read the first HTTP redirect without needing to load an eBay webpage.
+// eBay's short-link service redirects directly to /itm/<listing-id>.
+@interface RDShortResolver : NSObject <NSURLSessionTaskDelegate>
+@property (nonatomic, strong) NSURLSession *session;
+@property (nonatomic, copy) void (^finished)(NSString *);
+@property (atomic, assign) BOOL didFinish;
+@end
+
+@implementation RDShortResolver
+- (void)finish:(NSString *)item {
+    @synchronized (self) {
+        if (_didFinish) return;
+        _didFinish = YES;
+    }
+    void (^callback)(NSString *) = self.finished;
+    self.finished = nil;
+    [self.session invalidateAndCancel];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (callback) callback(item);
+    });
+}
+
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task
+willPerformHTTPRedirection:(NSHTTPURLResponse *)response
+        newRequest:(NSURLRequest *)request
+ completionHandler:(void (^)(NSURLRequest *))completion {
+    NSString *item = RDItemID(request.URL);
+    if (item) {
+        // Stop before loading a possibly blocked 403 listing page.
+        completion(nil);
+        [self finish:item];
+        return;
+    }
+    completion(request);
+}
+
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task
+didCompleteWithError:(NSError *)error {
+    NSString *item = RDItemID(task.response.URL);
+    [self finish:item];
+}
+@end
+
+static void RDResolve(NSURL *url, void (^completion)(NSString *)) {
+    if (!RDIsEbayShortLink(url)) {
+        if (completion) completion(nil);
+        return;
+    }
+    RDShortResolver *resolver = [RDShortResolver new];
+    resolver.finished = completion;
+    NSURLSessionConfiguration *config =
+        [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    config.timeoutIntervalForRequest = 7;
+    config.timeoutIntervalForResource = 10;
+    resolver.session = [NSURLSession sessionWithConfiguration:config
+                        delegate:resolver delegateQueue:nil];
+    NSMutableURLRequest *request =
+        [NSMutableURLRequest requestWithURL:url
+        cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:7];
+    request.HTTPMethod = @"GET";
+    [request setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_3 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1"
+  forHTTPHeaderField:@"User-Agent"];
+    [[resolver.session dataTaskWithRequest:request] resume];
+}
+
+// Modifies a verified FBS URL payload while preserving all launch options.
+static FBSOpenApplicationOptions *RDOptionsForItem(FBSOpenApplicationOptions *old,
+                                                   NSURL *newURL) {
+    if (!old || !newURL || ![old respondsToSelector:@selector(dictionary)])
+        return nil;
+    NSDictionary *original = old.dictionary;
+    if (![original isKindOfClass:[NSDictionary class]]) return nil;
+    NSMutableDictionary *updated = [original mutableCopy];
+    BOOL replaced = NO;
+    for (id key in original) {
+        id value = original[key];
+        if ([value isKindOfClass:[NSURL class]] && RDIsEbayShortLink(value)) {
+            updated[key] = newURL;
+            replaced = YES;
+        }
+    }
+    if (!replaced && old.url && RDIsEbayShortLink(old.url)) {
+        // Private FBS payload key used by iOS 15/16.
+        updated[@"__PayloadURL"] = newURL;
+        replaced = YES;
+    }
+    if (!replaced) return nil;
+    Class cls = [old class];
+    if (![cls respondsToSelector:@selector(optionsWithDictionary:)]) return nil;
+    FBSOpenApplicationOptions *replacement = [cls optionsWithDictionary:updated];
+    return [replacement.url isEqual:newURL] ? replacement : nil;
+}
+
+static NSURL *RDRequestURL(FBSOpenApplicationOptions *options) {
+    if ([options respondsToSelector:@selector(url)] && options.url)
+        return options.url;
+    if (![options respondsToSelector:@selector(dictionary)]) return nil;
+    for (id value in options.dictionary.allValues)
+        if ([value isKindOfClass:[NSURL class]] && RDIsEbayShortLink(value))
+            return value;
+    return nil;
+}
+
+static BOOL RDShouldRouteFBS(NSString *bid, FBSOpenApplicationOptions *options) {
+    return !gBypassing && RDEnabled() && RDBrowser(bid) &&
+           !objc_getAssociatedObject(options, &kHandledOptionsKey) &&
+           RDIsEbayShortLink(RDRequestURL(options));
+}
+
+static void RDPrepareFallback(FBSOpenApplicationOptions *options) {
+    if (options)
+        objc_setAssociatedObject(options, &kHandledOptionsKey, @YES,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static void RDSystemOpen(UIApplication *app, NSURL *url,
+                          NSDictionary *options, void (^completion)(BOOL)) {
     if (!url) {
         if (completion) completion(NO);
         return;
     }
-    gInternalOpen = YES;
+    gBypassing = YES;
     [app openURL:url options:options ?: @{} completionHandler:completion];
-    gInternalOpen = NO;
+    gBypassing = NO;
 }
 
-static void openInBrowser(UIApplication *app, NSURL *url,
-                          void (^completion)(BOOL)) {
-    NSURL *wrapped = reynardURL(url);
-    if (!wrapped) {
-        rawOpen(app,url,@{},completion);
-        return;
-    }
-    rawOpen(app,wrapped,@{},^(BOOL success) {
-        if (success) {
-            if (completion) completion(YES);
-        } else {
-            rawOpen(app,url,@{},completion);
-        }
-    });
+static void RDOpenBrowser(UIApplication *app, NSURL *url,
+                           void (^completion)(BOOL)) {
+    NSURL *reynard = RDReynardURL(url);
+    RDSystemOpen(app,reynard ?: url,@{},completion);
 }
 
-static void openUniversalOrBrowser(UIApplication *app, NSURL *url,
-                                   void (^completion)(BOOL)) {
-    // The exact URL is handed to iOS, without substituting an app bundle ID.
+static void RDOpenUniversal(UIApplication *app, NSURL *url,
+                             void (^completion)(BOOL)) {
     if (![url.scheme.lowercaseString isEqualToString:@"https"]) {
-        openInBrowser(app,url,completion);
+        RDOpenBrowser(app,url,completion);
         return;
     }
-    rawOpen(app,url,@{UIApplicationOpenURLOptionUniversalLinksOnly:@YES},
-            ^(BOOL handled) {
+    RDSystemOpen(app,url,@{UIApplicationOpenURLOptionUniversalLinksOnly:@YES},
+                 ^(BOOL handled) {
         if (handled) {
             if (completion) completion(YES);
         } else {
-            openInBrowser(app,url,completion);
+            RDOpenBrowser(app,url,completion);
         }
     });
 }
 
-static void openListing(UIApplication *app, NSString *item, NSURL *source,
-                        void (^completion)(BOOL)) {
-    NSURL *deeplink = RDEbayListingURL(item);
-    if (!deeplink) {
-        openUniversalOrBrowser(app,source,completion);
+static void RDOpenListing(UIApplication *app, NSString *item, NSURL *source,
+                           void (^completion)(BOOL)) {
+    NSURL *listing = RDEbayListingURL(item);
+    if (!listing) {
+        RDOpenBrowser(app,source,completion);
         return;
     }
-    // eBay 6.192.0 has an explicit item.view handler for this scheme.
-    rawOpen(app,deeplink,@{},^(BOOL launched) {
-        if (launched) {
+    RDSystemOpen(app,listing,@{},^(BOOL opened) {
+        if (opened) {
             if (completion) completion(YES);
         } else {
-            openUniversalOrBrowser(app,source,completion);
+            RDOpenBrowser(app,source,completion);
         }
     });
 }
 
-static NSString *canonicalItemFromHTML(NSData *body) {
-    if (!body.length) return nil;
-    NSData *head = body.length > 393216 ?
-        [body subdataWithRange:NSMakeRange(0,393216)] : body;
-    NSString *html = [[NSString alloc] initWithData:head encoding:NSUTF8StringEncoding];
-    if (!html.length) return nil;
-    static NSRegularExpression *tagRegex;
-    static NSRegularExpression *attributeRegex;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        tagRegex = [NSRegularExpression regularExpressionWithPattern:
-            @"<(?:link|meta)\\b[^>]{0,2000}(?:canonical|og:url)[^>]{0,2000}>"
-            options:NSRegularExpressionCaseInsensitive error:NULL];
-        attributeRegex = [NSRegularExpression regularExpressionWithPattern:
-            @"(?:href|content)\\s*=\\s*['\\\"]([^'\\\"]+)['\\\"]"
-            options:NSRegularExpressionCaseInsensitive error:NULL];
-    });
-    NSArray *tags = [tagRegex matchesInString:html options:0
-                                       range:NSMakeRange(0,html.length)];
-    for (NSTextCheckingResult *tag in tags) {
-        NSString *value = [html substringWithRange:tag.range];
-        NSArray *attrs = [attributeRegex matchesInString:value options:0
-                                            range:NSMakeRange(0,value.length)];
-        for (NSTextCheckingResult *attr in attrs) {
-            if (attr.numberOfRanges < 2) continue;
-            NSString *candidate = [[value substringWithRange:[attr rangeAtIndex:1]]
-                stringByReplacingOccurrencesOfString:@"&amp;" withString:@"&"];
-            NSString *item = RDItemID([NSURL URLWithString:candidate]);
-            if (item) return item;
-        }
-    }
-    return nil;
-}
-
-static void resolveShortLink(NSURL *url, void (^finished)(NSString *)) {
-    NSURLSessionConfiguration *configuration =
-        [NSURLSessionConfiguration ephemeralSessionConfiguration];
-    configuration.timeoutIntervalForRequest = 8;
-    configuration.timeoutIntervalForResource = 12;
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
-         cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:8];
-    request.HTTPMethod = @"GET";
-    [request setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_3 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1"
-       forHTTPHeaderField:@"User-Agent"];
-
-    NSURLSessionDataTask *task = [session dataTaskWithRequest:request
-        completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-            NSString *item = nil;
-            if (!error) {
-                item = RDItemID(response.URL);
-                if (!item) item = canonicalItemFromHTML(data);
-            }
-            [session finishTasksAndInvalidate];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                finished(item);
-            });
-        }];
-    [task resume];
-}
-
-static void route(UIApplication *app, NSURL *url,
-                  void (^completion)(BOOL)) {
+static void RDOpenLink(UIApplication *app, NSURL *url,
+                        void (^completion)(BOOL)) {
     if (RDIsEbayShortLink(url)) {
-        resolveShortLink(url,^(NSString *item) {
-            if (item) openListing(app,item,url,completion);
-            else openInBrowser(app,url,completion);
+        RDResolve(url,^(NSString *item) {
+            RDOpenListing(app,item,url,completion);
         });
-        return;
+    } else {
+        NSString *item = RDItemID(url);
+        if (item) RDOpenListing(app,item,url,completion);
+        else RDOpenUniversal(app,url,completion);
     }
-    NSString *item = RDItemID(url);
-    if (item) {
-        openListing(app,item,url,completion);
-        return;
-    }
-    // Instagram/Reddit/YouTube etc. retain complete content URLs.
-    openUniversalOrBrowser(app,url,completion);
 }
 
+// Catch standard UIKit link openings.
 %hook UIApplication
-
 - (void)openURL:(NSURL *)url options:(NSDictionary *)options
- completionHandler:(void (^)(BOOL))completion {
-    if (gInternalOpen || !enabled() || !RDIsAppLink(url) ||
+ completionHandler:(void (^)(BOOL success))completion {
+    if (gBypassing || !RDEnabled() || !RDIsAppLink(url) ||
         [options[UIApplicationOpenURLOptionUniversalLinksOnly] boolValue]) {
         %orig;
         return;
     }
-    route(self,url,completion);
+    RDOpenLink(self,url,completion);
 }
-
 - (BOOL)openURL:(NSURL *)url {
-    if (gInternalOpen || !enabled() || !RDIsAppLink(url)) return %orig;
-    route(self,url,nil);
+    if (gBypassing || !RDEnabled() || !RDIsAppLink(url)) return %orig;
+    RDOpenLink(self,url,nil);
     return YES;
 }
+%end
 
+// Catch the lower-level app-opening path used by some messaging apps.
+// Only eBay short URLs are intercepted here; every other launch passes through.
+%hook FBSOpenApplicationService
+- (void)openApplication:(NSString *)bid
+           withOptions:(FBSOpenApplicationOptions *)options
+            completion:(id)completion {
+    if (!RDShouldRouteFBS(bid,options)) { %orig; return; }
+    NSURL *original = RDRequestURL(options);
+    RDResolve(original, ^(NSString *item) {
+        FBSOpenApplicationOptions *replacement =
+            RDOptionsForItem(options,RDEbayListingURL(item));
+        gBypassing = YES;
+        if (replacement) {
+            [self openApplication:@"com.ebay.iphone"
+                     withOptions:replacement completion:completion];
+        } else {
+            RDPrepareFallback(options);
+            [self openApplication:bid withOptions:options completion:completion];
+        }
+        gBypassing = NO;
+    });
+}
+
+- (void)openApplication:(NSString *)bid
+           withOptions:(FBSOpenApplicationOptions *)options
+          clientHandle:(id)client
+            completion:(id)completion {
+    if (!RDShouldRouteFBS(bid,options)) { %orig; return; }
+    NSURL *original = RDRequestURL(options);
+    RDResolve(original, ^(NSString *item) {
+        FBSOpenApplicationOptions *replacement =
+            RDOptionsForItem(options,RDEbayListingURL(item));
+        gBypassing = YES;
+        if (replacement) {
+            [self openApplication:@"com.ebay.iphone" withOptions:replacement
+                    clientHandle:client completion:completion];
+        } else {
+            RDPrepareFallback(options);
+            [self openApplication:bid withOptions:options
+                    clientHandle:client completion:completion];
+        }
+        gBypassing = NO;
+    });
+}
 %end
