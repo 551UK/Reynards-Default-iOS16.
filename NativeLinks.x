@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <dlfcn.h>
 #import "Common/Common.h"
 #import "Routing.h"
 
@@ -285,3 +286,9 @@ static void RDOpenLink(UIApplication *app, NSURL *url,
     });
 }
 %end
+
+%ctor {
+    // Ensure FrontBoard's client class exists before Logos installs the hook.
+    dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices", RTLD_LAZY);
+    %init;
+}

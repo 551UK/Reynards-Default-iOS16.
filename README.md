@@ -1,6 +1,6 @@
 # Reynard Default iOS 16
 
-Opens eBay listings and supported app links in their apps. Other websites open in Reynard.
+Open eBay listings and supported links in their apps. Other websites open in Reynard.
 
 Settings and Control Centre toggles. iOS 16 rootless.
 

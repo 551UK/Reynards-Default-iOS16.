@@ -1,6 +1,6 @@
 Package: com.551uk.reynarddefault16
 Name: Reynard Default iOS 16
-Version: 1.0.4
+Version: 1.0.5
 Architecture: iphoneos-arm64
 Description: Open eBay items and app links correctly.
 Maintainer: 551UK
